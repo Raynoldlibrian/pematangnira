@@ -614,7 +614,7 @@ footer.foot{text-align:center;font-size:12px;color:var(--ink-soft);margin-top:40
   }
   document.getElementById('dashOpdFilter').addEventListener('change', applyDashFilter);
 
-  // ---- Unduh Excel ----
+  // ---- Unduh Excel (format resmi sesuai contoh surat) ----
   function statusTextFor(st) {
     if (!st) return 'Belum Dinilai';
     const key = st.hasil_verifikasi || st.status;
@@ -623,20 +623,109 @@ footer.foot{text-align:center;font-size:12px;color:var(--ink-soft);margin-top:40
     return 'Menunggu Verifikasi';
   }
 
-  function buildDetailRows(statusMap, variabelUnik) {
-    return variabelUnik.map(v => {
-      const st = statusMap[v.kode_variabel];
-      return {
-        'No': v.no_variabel,
-        'Variabel': v.nama_variabel,
-        'Dimensi': v.dimensi,
-        'Tingkat Dipilih': st ? st.tingkat_dipilih : '',
-        'Status': statusTextFor(st),
-        'Link Bukti Dukung': st ? st.link_bukti_dukung || '' : '',
-        'Catatan OPD': st ? st.catatan_opd || '' : '',
-        'Catatan Verifikator': st ? st.catatan_verifikator || '' : '',
-      };
+  // Urutan NO resmi mengikuti format surat (beda dari urutan dimensi A/B/C di aplikasi)
+  const OFFICIAL_ORDER = ['V01', 'V02', 'V03', 'V04', 'V07', 'V08', 'V09', 'V05', 'V06', 'V11', 'V10'];
+  const KET_LABEL = {
+    V01: 'Dokumen Perencanaan', V02: 'Dokumen Monitoring', V03: 'Dokumen Penjaminan Mutu',
+    V04: 'Dokumen SOP', V05: 'Dokumen Manajemen Resiko', V06: 'Dokumen Pengukuran Kinerja',
+    V07: 'Dokumen Diklat', V08: 'Dokumen Analisis Kebijakan', V09: 'Dokumen Manajemen Sumber Daya',
+    V10: 'Dokumen Budaya Organisasi', V11: 'Dokumen Inovasi',
+  };
+
+  // Sheet "TINGKAT KEMATANGAN PERANGKAT DAERAH" — format per-OPD sesuai contoh surat
+  function buildOpdWorksheet(namaOpd, tahun, statusMap, variabelByKode) {
+    const HEADER_ROW = 3, SUBHEADER_ROW = 4, DATA_START = 5;
+    const rows = [
+      ['TINGKAT KEMATANGAN PERANGKAT DAERAH', '', '', '', '', '', '', '', '', ''],
+      [`Tahun Penilaian ${tahun}`, '', '', '', '', '', '', '', '', ''],
+      ['Nama Perangkat Daerah', namaOpd, '', '', '', '', '', '', '', ''],
+      ['NO', 'VARIABEL', 'TINGKAT KLASIFIKASI', '', '', '', '', 'SKOR', 'KET', 'BUKTI DUKUNG'],
+      ['', '', 'I', 'II', 'III', 'IV', 'V', '', '', ''],
+    ];
+    const linkCells = [];
+    OFFICIAL_ORDER.forEach((kode, idx) => {
+      const v = variabelByKode[kode];
+      const st = statusMap[kode];
+      const tingkat = st ? Number(st.tingkat_dipilih) : null;
+      const row = [idx + 1, v ? v.nama_variabel : kode, '', '', '', '', '', tingkat || '', KET_LABEL[kode] || '', st ? (st.catatan_opd || '') : ''];
+      if (tingkat) row[2 + (tingkat - 1)] = 'v';
+      rows.push(row);
+      if (st && st.link_bukti_dukung) linkCells.push({ r: DATA_START + idx, c: 8, url: st.link_bukti_dukung });
     });
+    const TOTAL_ROW = DATA_START + OFFICIAL_ORDER.length;
+    rows.push(['TOTAL', '', '', '', '', '', '', '', '', '']);
+    rows.push(['', '', '', '', '', '', '', '', '', '']);
+    rows.push(['', '', '', '', '', '', '', '', '', '']);
+    rows.push(['', '', '', '', '', '', '', '', '', '']);
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!merges'] = [
+      { s: { r: 0, c: 0 }, e: { r: 0, c: 9 } },
+      { s: { r: 1, c: 0 }, e: { r: 1, c: 9 } },
+      { s: { r: 2, c: 1 }, e: { r: 2, c: 9 } },
+      { s: { r: HEADER_ROW, c: 0 }, e: { r: SUBHEADER_ROW, c: 0 } },
+      { s: { r: HEADER_ROW, c: 1 }, e: { r: SUBHEADER_ROW, c: 1 } },
+      { s: { r: HEADER_ROW, c: 2 }, e: { r: HEADER_ROW, c: 6 } },
+      { s: { r: HEADER_ROW, c: 7 }, e: { r: SUBHEADER_ROW, c: 7 } },
+      { s: { r: HEADER_ROW, c: 8 }, e: { r: SUBHEADER_ROW, c: 8 } },
+      { s: { r: HEADER_ROW, c: 9 }, e: { r: SUBHEADER_ROW, c: 9 } },
+      { s: { r: TOTAL_ROW, c: 0 }, e: { r: TOTAL_ROW, c: 6 } },
+    ];
+    ws['!cols'] = [{ wch: 4 }, { wch: 34 }, { wch: 5 }, { wch: 5 }, { wch: 5 }, { wch: 5 }, { wch: 5 }, { wch: 7 }, { wch: 22 }, { wch: 40 }];
+    const skorCol = XLSX.utils.encode_col(7);
+    const totalCellRef = XLSX.utils.encode_cell({ r: TOTAL_ROW, c: 7 });
+    if (ws[totalCellRef]) ws[totalCellRef].f = `SUM(${skorCol}${DATA_START + 1}:${skorCol}${TOTAL_ROW})`;
+    linkCells.forEach(lc => {
+      const ref = XLSX.utils.encode_cell({ r: lc.r, c: lc.c });
+      if (ws[ref]) ws[ref].l = { Target: lc.url };
+    });
+    return ws;
+  }
+
+  // Sheet "Kematangan Perangkat Daerah Kabupaten Indragiri Hulu" — rekap seluruh OPD sesuai lampiran surat
+  function buildRekapWorksheet(rekapList, tahun) {
+    const rows = [
+      ['Kematangan Perangkat Daerah Kabupaten Indragiri Hulu', '', ''],
+      [`Tahun Penilaian ${tahun}`, '', ''],
+      ['No.', 'Nama Perangkat Daerah', 'Nilai Kematangan PD'],
+    ];
+    rekapList.forEach((r, i) => rows.push([i + 1, r.nama_opd, r.nilai_akhir]));
+
+    const firstDataRow = 3;
+    const lastDataRow = firstDataRow + rekapList.length - 1;
+    const tpndRow = lastDataRow + 1;
+    const jpdRow = tpndRow + 1;
+    const kodRow = jpdRow + 2;
+    const tpndValue = rekapList.reduce((s, r) => s + Number(r.nilai_akhir || 0), 0);
+    const jpdValue = rekapList.length;
+    const kodValue = jpdValue ? Math.round((tpndValue / jpdValue) * 100) / 100 : 0;
+
+    rows.push(['', 'Total Nilai Perangkat Daerah (TPND)', tpndValue]);
+    rows.push(['', 'Jumlah Perangkat Daerah (JPD)', jpdValue]);
+    rows.push(['', '', '']);
+    rows.push(['', 'Kematangan Organisasi Daerah (KOD) = TPND / JPD', kodValue]);
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 2 } }, { s: { r: 1, c: 0 }, e: { r: 1, c: 2 } }];
+    ws['!cols'] = [{ wch: 5 }, { wch: 44 }, { wch: 20 }];
+
+    const c = (r) => XLSX.utils.encode_cell({ r, c: 2 });
+    ws[c(tpndRow)].f = `SUM(C${firstDataRow + 1}:C${lastDataRow + 1})`;
+    ws[c(jpdRow)].f = `COUNTA(C${firstDataRow + 1}:C${lastDataRow + 1})`;
+    ws[c(kodRow)].f = `ROUND(${c(tpndRow)}/${c(jpdRow)},2)`;
+    return ws;
+  }
+
+  async function fetchOpdStatusAndVariabel(idOpd, tahun) {
+    const [statusRes, indikator] = await Promise.all([
+      apiGet('status', { id_opd: idOpd, tahun }),
+      getIndikatorCache(),
+    ]);
+    const statusMap = {};
+    (statusRes.penilaian || []).forEach(p => { statusMap[p.kode_variabel] = p; });
+    const variabelByKode = {};
+    uniqueVariabel(indikator).forEach(v => { variabelByKode[v.kode_variabel] = v; });
+    return { statusMap, variabelByKode };
   }
 
   // Modal minta PIN OPD sebelum unduh detail dari Dashboard (Dashboard tidak ada gerbang login)
@@ -691,32 +780,13 @@ footer.foot{text-align:center;font-size:12px;color:var(--ink-soft);margin-top:40
     try {
       const wb = XLSX.utils.book_new();
 
-      const rekapRows = dashRekap.map((r, i) => ({
-        'No': i + 1,
-        'Nama OPD': r.nama_opd,
-        'Nilai Mandiri': r.nilai_mandiri,
-        'Revisi': r.revisi,
-        'Nilai Akhir': r.nilai_akhir,
-        'Kategori': r.kategori,
-        'Variabel Terisi': `${r.variabel_terisi}/11`,
-      }));
-      const wsRekap = XLSX.utils.json_to_sheet(rekapRows);
-      wsRekap['!cols'] = [{ wch: 4 }, { wch: 32 }, { wch: 13 }, { wch: 8 }, { wch: 11 }, { wch: 15 }, { wch: 14 }];
-      XLSX.utils.book_append_sheet(wb, wsRekap, `Rekap ${dashSelectedTahun}`);
-
-      if (filterId !== 'ALL') {
-        const [statusRes, indikator] = await Promise.all([
-          apiGet('status', { id_opd: filterId, tahun: dashSelectedTahun }),
-          getIndikatorCache(),
-        ]);
-        const statusMap = {};
-        (statusRes.penilaian || []).forEach(p => { statusMap[p.kode_variabel] = p; });
-        const variabelUnik = uniqueVariabel(indikator);
-        const detailRows = buildDetailRows(statusMap, variabelUnik);
-        const wsDetail = XLSX.utils.json_to_sheet(detailRows);
-        wsDetail['!cols'] = [{ wch: 4 }, { wch: 34 }, { wch: 8 }, { wch: 13 }, { wch: 18 }, { wch: 34 }, { wch: 28 }, { wch: 28 }];
-        const sheetName = (opdRow ? opdRow.nama_opd : filterId).slice(0, 28);
-        XLSX.utils.book_append_sheet(wb, wsDetail, sheetName);
+      if (filterId === 'ALL') {
+        const wsRekap = buildRekapWorksheet(dashRekap, dashSelectedTahun);
+        XLSX.utils.book_append_sheet(wb, wsRekap, `Rekap ${dashSelectedTahun}`);
+      } else {
+        const { statusMap, variabelByKode } = await fetchOpdStatusAndVariabel(filterId, dashSelectedTahun);
+        const wsOpd = buildOpdWorksheet(opdRow ? opdRow.nama_opd : filterId, dashSelectedTahun, statusMap, variabelByKode);
+        XLSX.utils.book_append_sheet(wb, wsOpd, 'Tingkat Kematangan');
       }
 
       const filenamePart = filterId !== 'ALL' ? (opdRow ? opdRow.nama_opd : filterId) : 'Seluruh-OPD';
@@ -737,19 +807,10 @@ footer.foot{text-align:center;font-size:12px;color:var(--ink-soft);margin-top:40
     const original = btn.textContent;
     btn.disabled = true; btn.textContent = 'Menyiapkan…';
     try {
-      const [statusRes, indikator] = await Promise.all([
-        apiGet('status', { id_opd: sessionOpd.id_opd, tahun: TAHUN_AKTIF }),
-        getIndikatorCache(),
-      ]);
-      const statusMap = {};
-      (statusRes.penilaian || []).forEach(p => { statusMap[p.kode_variabel] = p; });
-      const variabelUnik = uniqueVariabel(indikator);
-      const detailRows = buildDetailRows(statusMap, variabelUnik);
-
+      const { statusMap, variabelByKode } = await fetchOpdStatusAndVariabel(sessionOpd.id_opd, TAHUN_AKTIF);
       const wb = XLSX.utils.book_new();
-      const ws = XLSX.utils.json_to_sheet(detailRows);
-      ws['!cols'] = [{ wch: 4 }, { wch: 34 }, { wch: 8 }, { wch: 13 }, { wch: 18 }, { wch: 34 }, { wch: 28 }, { wch: 28 }];
-      XLSX.utils.book_append_sheet(wb, ws, sessionOpd.nama_opd.slice(0, 28));
+      const ws = buildOpdWorksheet(sessionOpd.nama_opd, TAHUN_AKTIF, statusMap, variabelByKode);
+      XLSX.utils.book_append_sheet(wb, ws, 'Tingkat Kematangan');
 
       const filename = `Kematangan-Organisasi_${sessionOpd.nama_opd.replace(/\s+/g, '-')}_${TAHUN_AKTIF}.xlsx`;
       XLSX.writeFile(wb, filename);
@@ -761,6 +822,7 @@ footer.foot{text-align:center;font-size:12px;color:var(--ink-soft);margin-top:40
     }
   }
   document.getElementById('btnExportOpdExcel').addEventListener('click', exportOpdOwnExcel);
+
 
 
   async function openJenisVariabelModal() {
